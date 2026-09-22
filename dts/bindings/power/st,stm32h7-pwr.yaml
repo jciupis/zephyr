@@ -64,3 +64,56 @@ properties:
     enum:
       - "1V8"
       - "2V5"
+
+  voltage-scale:
+    type: int
+    description: |
+      Voltage regulator scale selection
+
+      If present, this property can be used to indicate the desired
+      voltage regulator scale to use. This choice affects several
+      aspects of the system:
+        * power consumption
+        * memory and flash wait states
+        * maximal system clock frequency
+        * availability of certain peripherals
+        * ...
+
+      The following values can be selected [1]:
+      +---------+---------------------------+---------------------------------+
+      | Scale # |       Max. frequency      | Notes                           |
+      +---------+---------------------------+---------------------------------+
+      |    0    |   480 / 520 / 550 MHz [2] | Highest power consumption [4]   |
+      +---------+---------------------------+---------------------------------+
+      |    1    |           400 MHz         |                                 |
+      +---------+---------------------------+---------------------------------+
+      |    2    |           300 MHz         |                                 |
+      +---------+---------------------------+---------------------------------+
+      |    3    |     200 / 170 MHz [3]     | Lowest power consumption        |
+      +---------+---------------------------+---------------------------------+
+
+      [1] Source: for H742, H743, H750 and H753 series: RM0433, Table 60.
+      Kernel clock distribution overview. For H723, H725, H733 and H735:
+      product datasheets.
+      [2] For H723, H725, H733 and H735, the maximum frequency in VOS0 is
+      520 MHz with the possibility to reach 550 MHz if CPU_FREQ_BOOST is
+      configured in the RCC. For H742, H743, H750 and H753, the maximum
+      frequency in VOS0 is 480 MHz.
+      [3] For H723, H725, H733 and H735, the maximum frequency in VOS3 is
+      170 MHz. For H742, H743, H750 and H753, it is 200 MHz.
+      [4] On STM32H74x/H75x lines, VOS0 is the overdrive scale entered by
+      setting SYSCFG_PWRCR.ODEN, and is only valid when Vcore is generated
+      by the LDO (H7 Data Sheets; stm32h7xx_hal_pwr.h). Other supply modes
+      (e.g. SMPS-direct, LDO off) are limited to VOS1.
+
+      When this property is not present, the lowest voltage scale compatible
+      with the system's clock configuration is selected automatically: for
+      example, voltage scale 3 would be used if the system was configured
+      to operate with a system clock frequency of 64 MHz.
+
+      Note that the same behavior is observed if the property is provided but
+      the selected voltage scale is not compatible with the system's clock
+      configuration; in this case, clock configuration takes precedence and
+      the value of this property is ignored.
+    min: 0
+    max: 3
