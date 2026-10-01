@@ -230,6 +230,13 @@ BUILD_ASSERT(((STM32_PLL_P_DIVISOR == 1) || (STM32_PLL_P_DIVISOR % 2) == 0),
 	     "STM32H7/H7RS PLL1 DIVP divisor factor must be 1 or even");
 #endif /* STM32_PLL_P_ENABLED */
 
+BUILD_ASSERT(!(IS_ENABLED(STM32_SYSCLK_SRC_PLL) && IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE)),
+	     "PLL1 with no-auto-enable cannot be the system clock source");
+BUILD_ASSERT(!(IS_ENABLED(CONFIG_STM32H7_DUAL_CORE) &&
+	       (IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE) || IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE) ||
+		IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE))),
+	     "PLL no-auto-enable is unsupported on dual-core SoCs");
+
 #if !defined(CONFIG_SOC_SERIES_STM32H7RSX) && !defined(CONFIG_CPU_CORTEX_M4)
 static const uint16_t vos_cpu_freq_limits_mhz[] = {VOS_CPU_FREQ_LIMITS_MHZ};
 static const uint16_t vos_ahb_freq_limits_mhz[] = {VOS_AHB_FREQ_LIMITS_MHZ};
@@ -909,6 +916,27 @@ static int stm32_clock_control_get_subsys_rate(const struct device *clock,
 	return 0;
 }
 
+/** @brief Checks if src_clk is an output of a no-auto-enable PLL that is not running */
+static bool is_stopped_pll_output(uint32_t src_clk)
+{
+	switch (src_clk) {
+	case STM32_SRC_PLL1_P:
+	case STM32_SRC_PLL1_Q:
+	case STM32_SRC_PLL1_R:
+		return IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE) && (LL_RCC_PLL1_IsReady() == 0U);
+	case STM32_SRC_PLL2_P:
+	case STM32_SRC_PLL2_Q:
+	case STM32_SRC_PLL2_R:
+		return IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE) && (LL_RCC_PLL2_IsReady() == 0U);
+	case STM32_SRC_PLL3_P:
+	case STM32_SRC_PLL3_Q:
+	case STM32_SRC_PLL3_R:
+		return IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE) && (LL_RCC_PLL3_IsReady() == 0U);
+	default:
+		return false;
+	}
+}
+
 static enum clock_control_status stm32_clock_control_get_status(const struct device *dev,
 								clock_control_subsys_t sub_system)
 {
@@ -926,7 +954,7 @@ static enum clock_control_status stm32_clock_control_get_status(const struct dev
 		}
 	} else {
 		/* Domain clock sources */
-		if (enabled_clock(pclken->bus) == 0) {
+		if ((enabled_clock(pclken->bus) == 0) && !is_stopped_pll_output(pclken->bus)) {
 			return CLOCK_CONTROL_STATUS_ON;
 		} else {
 			return CLOCK_CONTROL_STATUS_OFF;
@@ -1164,8 +1192,10 @@ static int set_up_plls(void)
 		LL_RCC_PLL1S_Enable();
 	}
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	LL_RCC_PLL1_Enable();
-	while (LL_RCC_PLL1_IsReady() != 1U) {
+	if (!IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE)) {
+		LL_RCC_PLL1_Enable();
+		while (LL_RCC_PLL1_IsReady() != 1U) {
+		}
 	}
 
 #endif /* STM32_PLL_ENABLED */
@@ -1222,8 +1252,10 @@ static int set_up_plls(void)
 	}
 
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	LL_RCC_PLL2_Enable();
-	while (LL_RCC_PLL2_IsReady() != 1U) {
+	if (!IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE)) {
+		LL_RCC_PLL2_Enable();
+		while (LL_RCC_PLL2_IsReady() != 1U) {
+		}
 	}
 
 #endif /* STM32_PLL2_ENABLED */
@@ -1275,8 +1307,10 @@ static int set_up_plls(void)
 	}
 
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	LL_RCC_PLL3_Enable();
-	while (LL_RCC_PLL3_IsReady() != 1U) {
+	if (!IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE)) {
+		LL_RCC_PLL3_Enable();
+		while (LL_RCC_PLL3_IsReady() != 1U) {
+		}
 	}
 
 #endif /* STM32_PLL3_ENABLED */
