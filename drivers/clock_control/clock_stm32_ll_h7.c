@@ -356,42 +356,6 @@ static uint32_t vos_reg_val_get(uint32_t scale)
 	}
 }
 
-static bool is_freq_safe_for_scale(uint32_t cpu_hz, uint32_t ahb_hz, uint8_t scale)
-{
-#if defined(CONFIG_SOC_SERIES_STM32H7RSX)
-	/* For H7RS, only accept VOS0 */
-	return scale == 0;
-#else
-	if (scale >= ARRAY_SIZE(vos_cpu_freq_limits_mhz)) {
-		LOG_ERR("Unsupported voltage scale %u! Only %u exist", scale,
-			ARRAY_SIZE(vos_cpu_freq_limits_mhz));
-		return false;
-	}
-
-#if defined(SYSCFG_PWRCR_ODEN)
-	/*
-	 * On STM32H74x/H75x lines, VOS0 is the overdrive scale entered by
-	 * setting SYSCFG_PWRCR.ODEN, and is only valid when Vcore is generated
-	 * by the LDO (H7 Data Sheets; stm32h7xx_hal_pwr.h). Other supply modes
-	 * (e.g. SMPS-direct, LDO off) are limited to VOS1.
-	 */
-	if (!DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, ldo) &&
-	    !DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, smps_ldo) &&
-	    !DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, smps_ext_ldo) && (scale == 0)) {
-		return false;
-	}
-#endif
-
-	if (cpu_hz > MHZ(vos_cpu_freq_limits_mhz[scale])) {
-		return false;
-	} else if (ahb_hz > MHZ(vos_ahb_freq_limits_mhz[scale])) {
-		return false;
-	} else {
-		return true;
-	}
-#endif
-}
-
 static void activate_vos0(uint32_t cpu_hz)
 {
 #if defined(CONFIG_SOC_SERIES_STM32H7RSX)
@@ -438,42 +402,12 @@ static void activate_vos0(uint32_t cpu_hz)
 #endif
 }
 
-static void set_regulator_vos(uint32_t sysclk_freq, uint32_t hclk_freq, uint32_t wanted_scale)
+static void set_regulator_vos(uint32_t sysclk_freq, uint32_t scale)
 {
-	int32_t min_scale = 3;
-	uint32_t scale_to_apply;
-
-	do {
-		if (is_freq_safe_for_scale(sysclk_freq, hclk_freq, min_scale)) {
-			break;
-		}
-
-		min_scale--;
-	} while (min_scale >= 0);
-
-	/* Compile-time checks guard against min_scale becoming negative here.
-	 * If it happens nevertheless, fall back to 0.
-	 */
-	min_scale = min_scale < 0 ? 0 : min_scale;
-
-	if (wanted_scale == VOLTAGE_SCALE_AUTOMATIC) {
-		scale_to_apply = min_scale;
-	} else if (wanted_scale > min_scale) {
-		/*
-		 * This ought to never happen thanks to the
-		 * compile-time checks, but better safe than
-		 * sorry. Ideally, an error message should be
-		 * logged if this ever occurs...
-		 */
-		scale_to_apply = min_scale;
-	} else {
-		scale_to_apply = wanted_scale;
-	}
-
-	if (scale_to_apply == 0) {
+	if (scale == VOLTAGE_SCALE_AUTOMATIC) {
 		activate_vos0(sysclk_freq);
 	} else {
-		LL_PWR_SetRegulVoltageScaling(vos_reg_val_get(scale_to_apply));
+		LL_PWR_SetRegulVoltageScaling(vos_reg_val_get(scale));
 #if defined(CONFIG_SOC_SERIES_STM32H7RSX)
 		while (LL_PWR_IsActiveFlag_VOSRDY() == 0) {
 #else
@@ -1362,8 +1296,7 @@ int stm32_clock_control_init(const struct device *dev)
 	new_hclk_freq = get_bus_clock(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, STM32_HPRE);
 
 	/* Set voltage scale before setting up PLLs */
-	set_regulator_vos(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, MAX(old_hclk_freq, new_hclk_freq),
-			  SELECTED_VOLTAGE_SCALE);
+	set_regulator_vos(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, SELECTED_VOLTAGE_SCALE);
 
 	/* Set up PLLs */
 	r = set_up_plls();
@@ -1431,8 +1364,7 @@ int stm32_clock_control_init(const struct device *dev)
 		LL_SetFlashLatency(new_hclk_freq);
 	}
 
-	set_regulator_vos(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, new_hclk_freq,
-			  SELECTED_VOLTAGE_SCALE);
+	set_regulator_vos(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, SELECTED_VOLTAGE_SCALE);
 
 	z_stm32_hsem_unlock(CFG_HW_RCC_SEMID);
 #endif /* CONFIG_CPU_CORTEX_M7 */
