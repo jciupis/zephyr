@@ -209,6 +209,30 @@ BUILD_ASSERT(!(IS_ENABLED(CONFIG_STM32H7_DUAL_CORE) &&
 		IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE))),
 	     "PLL no-auto-enable is unsupported on dual-core SoCs");
 
+static struct pll_no_auto_enable {
+	struct k_spinlock lock;
+	uint32_t refcnt;
+	void (*enable)(void);
+	void (*disable)(void);
+	uint32_t (*is_ready)(void);
+} plls_no_auto_enable[3] = {
+	{
+		.enable = LL_RCC_PLL1_Enable,
+		.disable = LL_RCC_PLL1_Disable,
+		.is_ready = LL_RCC_PLL1_IsReady
+	},
+	{
+		.enable = LL_RCC_PLL2_Enable,
+		.disable = LL_RCC_PLL2_Disable,
+		.is_ready = LL_RCC_PLL2_IsReady
+	},
+	{
+		.enable = LL_RCC_PLL3_Enable,
+		.disable = LL_RCC_PLL3_Disable,
+		.is_ready = LL_RCC_PLL3_IsReady
+	},
+};
+
 static uint32_t get_bus_clock(uint32_t clock, uint32_t prescaler)
 {
 	return clock / prescaler;
@@ -455,17 +479,79 @@ int enabled_clock(uint32_t src_clk)
 	return -ENOTSUP;
 }
 
+static int8_t get_pll_no_auto_enable_idx(uint32_t src_clk)
+{
+	switch (src_clk) {
+	case STM32_SRC_PLL1_P:
+	case STM32_SRC_PLL1_Q:
+	case STM32_SRC_PLL1_R:
+		return IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE) ? 0 : -1;
+	case STM32_SRC_PLL2_P:
+	case STM32_SRC_PLL2_Q:
+	case STM32_SRC_PLL2_R:
+		return IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE) ? 1 : -1;
+	case STM32_SRC_PLL3_P:
+	case STM32_SRC_PLL3_Q:
+	case STM32_SRC_PLL3_R:
+		return IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE) ? 2 : -1;
+	default:
+		return -1;
+	}
+}
+
+static void enable_pll_no_auto_enable(int8_t pll_idx)
+{
+	/* Take spinlock, increase reference counter, enable the PLL,
+	 * release spinlock, busy wait until enabled
+	 */
+
+	bool wait_until_enabled = false;
+
+	K_SPINLOCK(&plls_no_auto_enable[pll_idx].lock) {
+		if (++plls_no_auto_enable[pll_idx].refcnt > 1) {
+			/* Already enabled  */
+			K_SPINLOCK_BREAK;
+		}
+
+		wait_until_enabled = true;
+
+		plls_no_auto_enable[pll_idx].enable();
+	}
+
+	if (wait_until_enabled) {
+		while (plls_no_auto_enable[pll_idx].is_ready() != 1) {
+		}
+	}
+}
+
+static void disable_pll_no_auto_enable(int8_t pll_idx)
+{
+	K_SPINLOCK(&plls_no_auto_enable[pll_idx].lock) {
+		if (--plls_no_auto_enable[pll_idx].refcnt > 0) {
+			/* Keep the PLL enabled */
+			K_SPINLOCK_BREAK;
+		}
+
+		plls_no_auto_enable[pll_idx].disable();
+	}
+}
+
 static int stm32_clock_control_configure(const struct device *dev,
 					 clock_control_subsys_t sub_system, void *data);
 
 static int stm32_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
 {
 	struct stm32_pclken *pclken = (struct stm32_pclken *)(sub_system);
+	int8_t pll_idx = get_pll_no_auto_enable_idx(pclken->bus);
 	volatile int temp;
 
 	if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
 		/* Source selection entry: apply it instead of toggling a gate */
 		return stm32_clock_control_configure(dev, sub_system, NULL);
+	}
+
+	if ((0 == enabled_clock(pclken->bus)) && (pll_idx >= 0)) {
+		enable_pll_no_auto_enable(pll_idx);
 	}
 
 	z_stm32_hsem_lock(CFG_HW_RCC_SEMID, HSEM_LOCK_DEFAULT_RETRY);
@@ -485,10 +571,13 @@ static int stm32_clock_control_on(const struct device *dev, clock_control_subsys
 static int stm32_clock_control_off(const struct device *dev, clock_control_subsys_t sub_system)
 {
 	struct stm32_pclken *pclken = (struct stm32_pclken *)(sub_system);
+	int8_t pll_idx = get_pll_no_auto_enable_idx(pclken->bus);
 
 	ARG_UNUSED(dev);
 
-	if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
+	if ((0 == enabled_clock(pclken->bus)) && (pll_idx >= 0)) {
+		disable_pll_no_auto_enable(pll_idx);
+	} else if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
 		/* Attempt to toggle a wrong periph clock bit */
 		return -ENOTSUP;
 	}
@@ -952,6 +1041,23 @@ static void stm32_clock_switch_to_hsi(void)
 	}
 }
 
+static bool shall_enable_pll(uint8_t idx)
+{
+	switch (idx) {
+	case 1:
+		return !IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE) ||
+			plls_no_auto_enable[0].refcnt > 0;
+	case 2:
+		return !IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE) ||
+			plls_no_auto_enable[1].refcnt > 0;
+	case 3:
+		return !IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE) ||
+			plls_no_auto_enable[2].refcnt > 0;
+	default:
+		return true;
+	}
+}
+
 __unused
 static int set_up_plls(void)
 {
@@ -1072,7 +1178,7 @@ static int set_up_plls(void)
 		LL_RCC_PLL1S_Enable();
 	}
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	if (!IS_ENABLED(STM32_PLL_NO_AUTO_ENABLE)) {
+	if (shall_enable_pll(1)) {
 		LL_RCC_PLL1_Enable();
 		while (LL_RCC_PLL1_IsReady() != 1U) {
 		}
@@ -1132,7 +1238,7 @@ static int set_up_plls(void)
 	}
 
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	if (!IS_ENABLED(STM32_PLL2_NO_AUTO_ENABLE)) {
+	if (shall_enable_pll(2)) {
 		LL_RCC_PLL2_Enable();
 		while (LL_RCC_PLL2_IsReady() != 1U) {
 		}
@@ -1187,7 +1293,7 @@ static int set_up_plls(void)
 	}
 
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
-	if (!IS_ENABLED(STM32_PLL3_NO_AUTO_ENABLE)) {
+	if (shall_enable_pll(3)) {
 		LL_RCC_PLL3_Enable();
 		while (LL_RCC_PLL3_IsReady() != 1U) {
 		}
